@@ -1,0 +1,103 @@
+#!/usr/bin/env python2.7
+import sys, argparse, re, math, subprocess, sets
+
+
+class ANSI_Color(object):
+    null_color = 59
+    raw_gradient = [131, 167, 203, 209, 173, 137, 179, 221, 227, 191, 149, 120, 78, 79, 116, 117, 74, 75, 68, 105, 62, 98, 97, 134, 176, 207, 164, 163, 126, 132, 168]
+
+    @staticmethod
+    def rotate_palette(shift_num):
+        return [ANSI_Color.null_color] + ANSI_Color.raw_gradient[shift_num:] + ANSI_Color.raw_gradient[:shift_num]
+
+    @staticmethod
+    def ansi_color(msg, vt100_index):
+        color_escape = "\033[38;5;%dm" % vt100_index
+        normal_escape = "\033[0m"
+        return color_escape + msg + normal_escape
+
+
+class XXD_Line(object):
+    address_separator = ": "
+    hex_data_separator = "  "
+    palette_display_character = u'\u25FC'
+
+    @staticmethod
+    def show_palette(palette):
+        print ANSI_Color.ansi_color(XXD_Line.palette_display_character, palette[0]).encode('utf-8'), "00"
+        num_non_null = len(palette)-1
+        boundaries = [(255-1)*(i/float(num_non_null))+1 for i in xrange(num_non_null)]
+        mins = [math.ceil(f) for f in boundaries]
+        maxs = [math.floor(f) for f in boundaries[1:]+[255.0]]
+        for i in range(num_non_null):
+            hex_range = "%02X - %02X" % (mins[i], maxs[i])
+            print ANSI_Color.ansi_color(XXD_Line.palette_display_character, palette[i+1]).encode('utf-8'), hex_range
+
+    @staticmethod
+    def colorize_byte(b, base, palette, pixelate):
+        if b.strip():
+            parsed_byte = int(b, base)
+            if parsed_byte:
+                color_index = int((parsed_byte / 256.0) * (len(palette)-1)) + 1
+            else:
+                color_index = 0 # null color
+            if pixelate: b = XXD_Line.palette_display_character
+            return ANSI_Color.ansi_color(b, palette[color_index])
+        else:
+            return b
+
+    def __init__(self, line, palette):
+        self.palette = palette
+        if line.rstrip() == "*":
+            self.address = "*"
+            self.hex_data = ""
+            self.ascii_data = ""
+        else:
+            self.address = line.split(XXD_Line.address_separator)[0] + XXD_Line.address_separator
+            self.hex_data = line[len(self.address):].split(XXD_Line.hex_data_separator)[0] + XXD_Line.hex_data_separator
+            self.ascii_data = line[len(self.address+self.hex_data):]
+
+    def colorize(self, binary_mode, pixelate):
+        if binary_mode:
+            base = 2
+            regex = "([01]{8})"
+        else:
+            base = 16
+            regex = "([A-Fa-f0-9]{2})"
+        colored_hex = ''.join([XXD_Line.colorize_byte(b, base, self.palette, pixelate) for b in re.split(regex, self.hex_data)])
+        return "%s%s%s" % (self.address, colored_hex, self.ascii_data)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(
+           description="colorized xxd",
+           epilog="NOTE: Above are cxxd-specific optargs. All xxd optargs should also be supported.",
+           formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=25, width=80)
+         )
+    ap.add_argument("-x", "--pixelate", action="store_true", default=False, help="replace hex values with colored blocks")
+    ap.add_argument("-d", "--display_palette", action="store_true", default=False, help="display colors with the byte range covered")
+    ap.add_argument("-R", "--rotate_colors", type=int, default=0, help="circularly rotate color gradient base index")
+    args, rem_args = ap.parse_known_args()
+
+    use_binary = sets.Set(["-b", "--bits"]).intersection(sets.Set(rem_args))
+    skip_colorize = sets.Set(["-r", "--revert", "-i", "--include"]).intersection(sets.Set(rem_args))
+
+    xxd_palette = ANSI_Color.rotate_palette(args.rotate_colors)
+
+    if (args.display_palette):
+        XXD_Line.show_palette(xxd_palette)
+        sys.exit()
+
+    try:
+        stdin_for_proc = None
+        if not sys.stdin.isatty():
+            stdin_for_proc = sys.stdin
+        for line in subprocess.check_output(['xxd'] + rem_args, stdin=sys.stdin).split("\n"):
+            if line:
+                if skip_colorize:
+                    print line
+                else:
+                    print XXD_Line(line, xxd_palette).colorize(use_binary, args.pixelate).encode('utf-8')
+    except IOError: # allow stdout to be closed by pipes like `head`
+        pass
+
