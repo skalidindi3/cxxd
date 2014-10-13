@@ -17,3 +17,5 @@ for i in {0..255}; do printf `printf "\\\\\x%02x" $i`; done | ./cxxd
 TODO
 ====
 * Tests
+* Better color gradient at pink/purple range
+* Versioning
