@@ -80,7 +80,8 @@ if __name__ == "__main__":
     args, rem_args = ap.parse_known_args()
 
     use_binary = sets.Set(["-b", "--bits"]).intersection(sets.Set(rem_args))
-    skip_colorize = sets.Set(["-r", "--revert", "-i", "--include"]).intersection(sets.Set(rem_args))
+    non_hexdump_output = sets.Set(["-r", "--revert", "-i", "--include"]).intersection(sets.Set(rem_args))
+    skip_colorize = non_hexdump_output or not sys.stdout.isatty()
 
     xxd_palette = ANSI_Color.rotate_palette(args.rotate_colors)
 
