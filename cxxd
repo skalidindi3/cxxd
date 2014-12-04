@@ -90,9 +90,6 @@ if __name__ == "__main__":
         sys.exit()
 
     try:
-        stdin_for_proc = None
-        if not sys.stdin.isatty():
-            stdin_for_proc = sys.stdin
         for line in subprocess.check_output(['xxd'] + rem_args, stdin=sys.stdin).split("\n"):
             if line:
                 if skip_colorize:
