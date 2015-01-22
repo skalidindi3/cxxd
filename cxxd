@@ -1,5 +1,5 @@
 #!/usr/bin/env python2.7
-import sys, argparse, re, math, subprocess, sets
+import sys, argparse, re, math, subprocess
 
 
 class ANSI_Color(object):
@@ -79,8 +79,8 @@ if __name__ == "__main__":
     ap.add_argument("-R", "--rotate_colors", type=int, default=0, help="circularly rotate color gradient base index")
     args, rem_args = ap.parse_known_args()
 
-    use_binary = sets.Set(["-b", "--bits"]).intersection(sets.Set(rem_args))
-    non_hexdump_output = sets.Set(["-r", "--revert", "-i", "--include"]).intersection(sets.Set(rem_args))
+    use_binary = set(["-b", "--bits"]).intersection(set(rem_args))
+    non_hexdump_output = set(["-r", "--revert", "-i", "--include"]).intersection(set(rem_args))
     skip_colorize = non_hexdump_output or not sys.stdout.isatty()
 
     xxd_palette = ANSI_Color.rotate_palette(args.rotate_colors)
