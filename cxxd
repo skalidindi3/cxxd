@@ -1,20 +1,55 @@
-#!/usr/bin/env python2.7
-import sys, argparse, re, math, subprocess
+#!/usr/bin/env python
+
+import argparse
+import curses
+import math
+import re
+import subprocess
+import sys
+from itertools import islice
+
+
+def XXD_Output_Gen(argv, parser = None):
+    try:
+        for line in subprocess.check_output(['xxd'] + argv, stdin=sys.stdin).split("\n"):
+            if line:
+                yield line
+    except IOError:
+        pass # allow stdout to be closed by programs like `head`
+    except subprocess.CalledProcessError:
+        if parser:
+          sys.stderr.write("\n".join(["cxxd options:"] + parser.format_help().split("\n")[5:-2]))
+          sys.stderr.flush()
 
 
 class ANSI_Color(object):
+    curses_rgb_interval = int(math.ceil(256/6.0))
+    curses_rgb_start_index = 16
     null_color = 59
     raw_gradient = [131, 167, 203, 209, 173, 137, 179, 221, 227, 191, 149, 120, 78, 79, 116, 117, 74, 75, 68, 105, 62, 98, 97, 134, 176, 207, 164, 163, 126, 132, 168]
 
     @staticmethod
+    def curses_to_rgb(c):
+        return ( ((c - ANSI_Color.curses_rgb_start_index) / 36) * ANSI_Color.curses_rgb_interval, \
+            (((c - ANSI_Color.curses_rgb_start_index) % 36) / 6) * ANSI_Color.curses_rgb_interval, \
+            ((c - ANSI_Color.curses_rgb_start_index) % 6) * ANSI_Color.curses_rgb_interval )
+
+    @staticmethod
+    def rgb_to_curses(r, g, b):
+        return ANSI_Color.curses_rgb_start_index + \
+            (r / ANSI_Color.curses_rgb_interval * 36) + \
+            (g / ANSI_Color.curses_rgb_interval * 6) + \
+            (b / ANSI_Color.curses_rgb_interval)
+
+    @staticmethod
     def rotate_palette(shift_num):
-        return [ANSI_Color.null_color] + ANSI_Color.raw_gradient[shift_num:] + ANSI_Color.raw_gradient[:shift_num]
+        return [ANSI_Color.null_color] + \
+            ANSI_Color.raw_gradient[shift_num % len(ANSI_Color.raw_gradient):] + \
+            ANSI_Color.raw_gradient[:shift_num % len(ANSI_Color.raw_gradient)]
 
     @staticmethod
     def ansi_color(msg, vt100_index):
-        color_escape = "\033[38;5;%dm" % vt100_index
-        normal_escape = "\033[0m"
-        return color_escape + msg + normal_escape
+        return "\033[38;5;%dm%s\033[0m" % (vt100_index, msg)
 
 
 class XXD_Line(object):
@@ -34,41 +69,123 @@ class XXD_Line(object):
             print ANSI_Color.ansi_color(XXD_Line.palette_display_character, palette[i+1]).encode('utf-8'), hex_range
 
     @staticmethod
-    def colorize_byte(b, base, palette, pixelate):
-        if b.strip():
-            parsed_byte = int(b, base)
-            if parsed_byte:
-                color_index = int((parsed_byte / 256.0) * (len(palette)-1)) + 1
-            else:
-                color_index = 0 # null color
-            if pixelate: b = XXD_Line.palette_display_character
-            return ANSI_Color.ansi_color(b, palette[color_index])
-        else:
-            return b
+    def get_byte_color(b, base, palette):
+        if not b.strip(): return 0
+        parsed_byte = int(b, base)
+        return (int((parsed_byte / 256.0) * (len(palette)-1)) + 1) if parsed_byte else 0
 
-    def __init__(self, line, palette):
-        self.palette = palette
+    @staticmethod
+    def colorize_byte_tuple(b, base, palette, pixelate):
+        color_index = palette[XXD_Line.get_byte_color(b, base, palette)]
+        string = XXD_Line.palette_display_character if pixelate and b.strip() else b
+        return (string, color_index)
+
+    @staticmethod
+    def colorize_byte(b, base, palette, pixelate):
+        s, c = XXD_Line.colorize_byte_tuple(b, base, palette, pixelate)
+        return ANSI_Color.ansi_color(s, c)
+
+    def __init__(self, line, binary_mode):
+        self.base, regex = (2, "([01]{8})") if binary_mode else (16, "([A-Fa-f0-9]{2})")
         if line.rstrip() == "*":
             self.address = "*"
-            self.hex_data = ""
+            self.hex_data = []
             self.ascii_data = ""
         else:
-            self.address = line.split(XXD_Line.address_separator)[0] + XXD_Line.address_separator
-            self.hex_data = line[len(self.address):].split(XXD_Line.hex_data_separator)[0] + XXD_Line.hex_data_separator
-            self.ascii_data = line[len(self.address+self.hex_data):]
+            address, _, hex_data = line.partition(XXD_Line.address_separator)
+            hex_data, _, ascii_data = hex_data.partition(XXD_Line.hex_data_separator)
+            self.address = address + XXD_Line.address_separator
+            self.hex_data = filter(None, re.split(regex, hex_data))
+            self.ascii_data = XXD_Line.hex_data_separator + ascii_data
 
-    def colorize(self, binary_mode, pixelate):
-        if binary_mode:
-            base = 2
-            regex = "([01]{8})"
+    def colorize(self, palette, pixelate):
+        return "%s%s%s" % (self.address, ''.join([XXD_Line.colorize_byte(b, self.base, palette, pixelate) for b in self.hex_data]), self.ascii_data)
+
+    def colorize_tuple(self, palette, pixelate):
+        return [(self.address, 0)] + [XXD_Line.colorize_byte_tuple(b, self.base, palette, pixelate) for b in self.hex_data] + [(self.ascii_data, 0)]
+
+
+class XXD_Pager:
+    SPACE_KEY = 32
+    ESC_KEY = 27
+
+    def __init__(self, lineGen, rotation_index, binary_mode, pixelate):
+        self.rotation_index = rotation_index
+        self.binary_mode = binary_mode
+        self.pixelate = pixelate
+
+        self.initCurses()
+        self.initLines(lineGen)
+        self.loop()
+
+    def initCurses(self):
+        self.screen = curses.initscr()
+        curses.start_color()
+        curses.use_default_colors()
+        for i in xrange(curses.COLORS):
+            curses.init_pair(i, i, -1)
+        curses.noecho()       # disable echoing of keys
+        curses.cbreak()       # enable unbuffered input
+        self.screen.keypad(1) # enable direction keys
+        self.screen.border(0) # disable border
+
+    def initLines(self, lineGen):
+        self.screenStartIndex = 0
+        self.screenLineGen = lineGen
+        self.screenLines = [line for line in islice(self.screenLineGen, curses.LINES)]
+
+    def upLines(self, numLines):
+        self.screenStartIndex = max(0, self.screenStartIndex - numLines)
+
+    def downLines(self, numLines):
+        if len(self.screenLines) < curses.LINES: return
+        numNewLines = (self.screenStartIndex + curses.LINES + numLines) - len(self.screenLines)
+        if numNewLines > 0:
+            nextLines = [line for line in islice(self.screenLineGen, numNewLines)]
+            self.screenLines.extend(nextLines)
+            self.screenStartIndex = len(self.screenLines) - curses.LINES
         else:
-            base = 16
-            regex = "([A-Fa-f0-9]{2})"
-        colored_hex = ''.join([XXD_Line.colorize_byte(b, base, self.palette, pixelate) for b in re.split(regex, self.hex_data)])
-        return "%s%s%s" % (self.address, colored_hex, self.ascii_data)
+            self.screenStartIndex += numLines
+
+    def updateScreen(self):
+        self.screen.erase()
+        for index, line in enumerate(self.screenLines[self.screenStartIndex : self.screenStartIndex + curses.LINES]):
+            char_index = 0
+            for s, c in XXD_Line(line, self.binary_mode).colorize_tuple(ANSI_Color.rotate_palette(self.rotation_index), self.pixelate):
+                self.screen.addstr(index, char_index, s, curses.color_pair(c))
+                char_index += len(s)
+        self.screen.refresh()
+
+    def loop(self):
+        while True:
+            self.updateScreen()
+            c = self.screen.getch()
+            if c == curses.KEY_UP:
+                self.upLines(1)
+            elif c == curses.KEY_DOWN:
+                self.downLines(1)
+            elif c == curses.KEY_PPAGE:
+                self.upLines(curses.LINES)
+            elif c == curses.KEY_NPAGE:
+                self.downLines(curses.LINES)
+            elif c == curses.KEY_RIGHT:
+                self.rotation_index += 1
+            elif c == curses.KEY_LEFT:
+                self.rotation_index -= 1
+            elif c == self.ESC_KEY:
+                self.__del__()
+                break;
+            #TODO: handle c == curses.KEY_RESIZE
+
+    def __del__(self):
+        curses.initscr()
+        curses.nocbreak()
+        self.screen.keypad(0)
+        curses.echo()
+        curses.endwin()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     ap = argparse.ArgumentParser(
            description="colorized xxd",
            epilog="NOTE: Above are cxxd-specific optargs. All xxd optargs should also be supported.",
@@ -76,26 +193,32 @@ if __name__ == "__main__":
          )
     ap.add_argument("-x", "--pixelate", action="store_true", default=False, help="replace hex values with colored blocks")
     ap.add_argument("-d", "--display_palette", action="store_true", default=False, help="display colors with the byte range covered")
+    ap.add_argument("-I", "--interactive", action="store_true", default=False, help="paginate with interactive coloring")
     ap.add_argument("-R", "--rotate_colors", type=int, default=0, help="circularly rotate color gradient base index")
     args, rem_args = ap.parse_known_args()
 
-    use_binary = set(["-b", "--bits"]).intersection(set(rem_args))
-    non_hexdump_output = set(["-r", "--revert", "-i", "--include"]).intersection(set(rem_args))
-    skip_colorize = non_hexdump_output or not sys.stdout.isatty()
-
-    xxd_palette = ANSI_Color.rotate_palette(args.rotate_colors)
-
     if (args.display_palette):
-        XXD_Line.show_palette(xxd_palette)
+        XXD_Line.show_palette(ANSI_Color.rotate_palette(args.rotate_colors))
         sys.exit()
 
-    try:
-        for line in subprocess.check_output(['xxd'] + rem_args, stdin=sys.stdin).split("\n"):
-            if line:
-                if skip_colorize:
-                    print line
-                else:
-                    print XXD_Line(line, xxd_palette).colorize(use_binary, args.pixelate).encode('utf-8')
-    except IOError: # allow stdout to be closed by pipes like `head`
-        pass
+    binary_mode = set(["-b", "--b", "-bits", "--bits"]).intersection(set(rem_args))
+    xxd_only_options = set([
+        "-r", "--r", "-revert", "--revert",
+        "-i", "--i", "-include", "--include",
+        "-p", "--p", "-ps", "--ps", "-plain", "--plain", "-postscript", "--postscript",
+      ]).intersection(set(rem_args))
+    skip_colorize = xxd_only_options or not sys.stdout.isatty()
+
+    # TODO: doc: paging + piped input a no go --> use proc substitution
+    # TODO: doc: tmux/screen problems: set `export TERM=screen-256color`
+
+    if skip_colorize:
+        for line in XXD_Output_Gen(rem_args, ap): print line
+    elif args.interactive:
+        if args.pixelate:
+            raise Exception("pixelating not supported in interactive mode")
+        XXD_Pager(XXD_Output_Gen(rem_args, ap), args.rotate_colors, binary_mode, args.pixelate)
+    else:
+        for line in XXD_Output_Gen(rem_args, ap):
+            print XXD_Line(line, binary_mode).colorize(ANSI_Color.rotate_palette(args.rotate_colors), args.pixelate).encode('utf-8')
 
