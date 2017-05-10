@@ -19,3 +19,4 @@ TODO
 * Tests
 * Better color gradient at pink/purple range
 * Versioning
+* Failure modes: file doesn't exist
