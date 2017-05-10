@@ -1,107 +1,137 @@
-#!/usr/bin/env python2.7
-import sys, argparse, re, math, subprocess
+#!/usr/bin/env python
+from __future__ import print_function
+import argparse
+import re
+import subprocess
+import sys
+from abc import ABCMeta, abstractmethod
+from collections import deque
+from copy import deepcopy
+from signal import signal, SIGPIPE, SIG_DFL
 
 
-class ANSI_Color(object):
+def colorize(s, vt100_index):
+    return "\033[38;5;%dm%s\033[0m" % (vt100_index, s)
+
+
+class XXDParser(object):
+    __metaclass__ = ABCMeta
+
     null_color = 59
-    raw_gradient = [
+    address_separator = ": "
+    hex_separator = "  "
+    pixel_char = u'\u25FC'
+    regex_bin = "([01]{8})"
+    regex_hex = "([A-Fa-f0-9]{2})"
+
+    def __init__(self, binary):
+        self.base = 2 if binary else 16
+        self.regex = XXDParser.regex_bin if binary else XXDParser.regex_hex
+
+    @abstractmethod
+    def color_picker(self, byte):
+        """Return the color index that this byte maps to."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def show_palette(self):
+        """Return the expected color mapping."""
+        raise NotImplementedError
+
+    def parse(self, hex_data, pixelate):
+        byte_data = (b for b in re.split(self.regex, hex_data))
+        def map_color(byte):
+            if not byte.strip():
+                return byte
+            to_show = XXDParser.pixel_char if pixelate else byte
+            return colorize(to_show, self.color_picker(int(byte, self.base)))
+        colored_data = (map_color(b) for b in byte_data)
+        return ''.join(colored_data)
+
+
+class GradientPalette(XXDParser):
+    base_palette = deque([
         131, 167, 203, 209, 173, 137, 179, 221,
         227, 191, 149, 120,  78,  79, 116, 117,
          74,  75,  68, 105,  62,  98,  97, 134,
         176, 207, 164, 163, 126, 132, 168
-    ]
+    ])
+
+    def __init__(self, binary, rotate_index):
+        super(GradientPalette, self).__init__(binary)
+        self.palette = GradientPalette.rotate(rotate_index)
 
     @staticmethod
-    def rotate_palette(shift_num):
-        return [ANSI_Color.null_color] + ANSI_Color.raw_gradient[shift_num:] + ANSI_Color.raw_gradient[:shift_num]
+    def rotate(num):
+        rotated = deepcopy(GradientPalette.base_palette)
+        rotated.rotate(-num)
+        return rotated
 
-    @staticmethod
-    def ansi_color(msg, vt100_index):
-        color_escape = "\033[38;5;%dm" % vt100_index
-        normal_escape = "\033[0m"
-        return color_escape + msg + normal_escape
+    def color_picker(self, byte):
+        if not byte:
+            return XXDParser.null_color
+        index = int(len(self.palette) * byte / 256.0)
+        return self.palette[index]
 
-
-class XXD_Line(object):
-    address_separator = ": "
-    hex_data_separator = "  "
-    palette_display_character = u'\u25FC'
-
-    @staticmethod
-    def show_palette(palette):
-        print ANSI_Color.ansi_color(XXD_Line.palette_display_character, palette[0]).encode('utf-8'), "00"
-        num_non_null = len(palette)-1
-        boundaries = [(255-1)*(i/float(num_non_null))+1 for i in xrange(num_non_null)]
-        mins = [math.ceil(f) for f in boundaries]
-        maxs = [math.floor(f) for f in boundaries[1:]+[255.0]]
-        for i in range(num_non_null):
-            hex_range = "%02X - %02X" % (mins[i], maxs[i])
-            print ANSI_Color.ansi_color(XXD_Line.palette_display_character, palette[i+1]).encode('utf-8'), hex_range
-
-    @staticmethod
-    def colorize_byte(b, base, palette, pixelate):
-        if b.strip():
-            parsed_byte = int(b, base)
-            if parsed_byte:
-                color_index = int((parsed_byte / 256.0) * (len(palette)-1)) + 1
-            else:
-                color_index = 0 # null color
-            if pixelate: b = XXD_Line.palette_display_character
-            return ANSI_Color.ansi_color(b, palette[color_index])
-        else:
-            return b
-
-    def __init__(self, line, palette):
-        self.palette = palette
-        if line.rstrip() == "*":
-            self.address = "*"
-            self.hex_data = ""
-            self.ascii_data = ""
-        else:
-            self.address = line.split(XXD_Line.address_separator)[0] + XXD_Line.address_separator
-            self.hex_data = line[len(self.address):].split(XXD_Line.hex_data_separator)[0] + XXD_Line.hex_data_separator
-            self.ascii_data = line[len(self.address+self.hex_data):]
-
-    def colorize(self, binary_mode, pixelate):
-        if binary_mode:
-            base = 2
-            regex = "([01]{8})"
-        else:
-            base = 16
-            regex = "([A-Fa-f0-9]{2})"
-        colored_hex = ''.join([XXD_Line.colorize_byte(b, base, self.palette, pixelate) for b in re.split(regex, self.hex_data)])
-        return "%s%s%s" % (self.address, colored_hex, self.ascii_data)
+    def show_palette(self):
+        raise NotImplementedError("boo")
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser(
-           description="colorized xxd",
-           epilog="NOTE: Above are cxxd-specific optargs. All xxd optargs should also be supported.",
-           formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=25, width=80)
-         )
-    ap.add_argument("-x", "--pixelate", action="store_true", default=False, help="replace hex values with colored blocks")
-    ap.add_argument("-d", "--display_palette", action="store_true", default=False, help="display colors with the byte range covered")
-    ap.add_argument("-R", "--rotate_colors", type=int, default=0, help="circularly rotate color gradient base index")
-    args, rem_args = ap.parse_known_args()
+class AsciiPalette(XXDParser):
+    def __init__(self, binary, rotate_index):
+        super(GradientPalette, self).__init__(binary)
+        self.palette = GradientPalette.rotate(rotate_index)
 
-    use_binary = set(["-b", "--bits"]).intersection(set(rem_args))
-    skip_colorize = set(["-r", "--revert", "-i", "--include"]).intersection(set(rem_args))
+    def color_picker(self, byte):
+        if byte >= 0x20 and byte < 0x7F:
+            # byte is a printable character
+            byte = chr(byte)
+            if byte.isalpha():
+                return # chars
+            if byte.isdigit():
+                return # num
+            if byte is " ":
+                return # space
+            if byte is "	":
+                return # tab
+            return # punctuation
+        if byte == 0x0A:
+            return # newline
+        if byte == 0x0D:
+            return # carriage return
+        return XXDParser.null_color # other
 
-    xxd_palette = ANSI_Color.rotate_palette(args.rotate_colors)
+    def show_palette(self):
+        raise NotImplementedError("boo")
 
-    if (args.display_palette):
-        XXD_Line.show_palette(xxd_palette)
-        sys.exit()
 
-    try:
-        for line in subprocess.check_output(['xxd'] + rem_args, stdin=sys.stdin).split("\n"):
-            if line:
-                if skip_colorize:
-                    print line
-                else:
-                    print XXD_Line(line, xxd_palette).colorize(use_binary, args.pixelate).encode('utf-8')
-    except IOError: # allow stdout to be closed by pipes like `head`
-        pass
-    except subprocess.CalledProcessError as e:
-        exit(e.returncode)
+def format_line(line, colorizer):
+    if line == "*\n":
+        return line
+    address, hex_ascii = line.split(XXDParser.address_separator, 1)
+    hex_data, ascii_data = hex_ascii.split(XXDParser.hex_separator, 1)
+    hex_data = colorizer(hex_data)
+    return address + XXDParser.address_separator + hex_data + XXDParser.hex_separator + ascii_data[:-1]
+
+
+signal(SIGPIPE,SIG_DFL)
+
+ap = argparse.ArgumentParser(
+    description="colorized xxd",
+    epilog="NOTE: Above are cxxd-specific optargs. All xxd optargs should also be supported.",
+    formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=25, width=80)
+)
+ap.add_argument("-R", "--rotate", type=int, default=0, help="circularly rotate color gradient base index")
+ap.add_argument("-x", "--pixelate", action="store_true", default=False, help="replace hex values with colored blocks")
+args, rem_args = ap.parse_known_args()
+
+parser = GradientPalette(False, args.rotate)
+colorizer = lambda line: parser.parse(line, args.pixelate)
+xxd = subprocess.Popen(["xxd"] + rem_args, stdin=sys.stdin, stdout=subprocess.PIPE)
+map(lambda line: print(format_line(line, colorizer).encode('utf-8')), xxd.stdout)
+
+# When `xxd` returns an error code, propagate it up.
+exitcode = xxd.wait()
+if exitcode:
+    exit(exitcode)
 
