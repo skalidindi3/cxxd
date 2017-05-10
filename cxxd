@@ -4,7 +4,12 @@ import sys, argparse, re, math, subprocess
 
 class ANSI_Color(object):
     null_color = 59
-    raw_gradient = [131, 167, 203, 209, 173, 137, 179, 221, 227, 191, 149, 120, 78, 79, 116, 117, 74, 75, 68, 105, 62, 98, 97, 134, 176, 207, 164, 163, 126, 132, 168]
+    raw_gradient = [
+        131, 167, 203, 209, 173, 137, 179, 221,
+        227, 191, 149, 120,  78,  79, 116, 117,
+         74,  75,  68, 105,  62,  98,  97, 134,
+        176, 207, 164, 163, 126, 132, 168
+    ]
 
     @staticmethod
     def rotate_palette(shift_num):
@@ -80,8 +85,7 @@ if __name__ == "__main__":
     args, rem_args = ap.parse_known_args()
 
     use_binary = set(["-b", "--bits"]).intersection(set(rem_args))
-    non_hexdump_output = set(["-r", "--revert", "-i", "--include"]).intersection(set(rem_args))
-    skip_colorize = non_hexdump_output or not sys.stdout.isatty()
+    skip_colorize = set(["-r", "--revert", "-i", "--include"]).intersection(set(rem_args))
 
     xxd_palette = ANSI_Color.rotate_palette(args.rotate_colors)
 
@@ -98,4 +102,6 @@ if __name__ == "__main__":
                     print XXD_Line(line, xxd_palette).colorize(use_binary, args.pixelate).encode('utf-8')
     except IOError: # allow stdout to be closed by pipes like `head`
         pass
+    except subprocess.CalledProcessError as e:
+        exit(e.returncode)
 
